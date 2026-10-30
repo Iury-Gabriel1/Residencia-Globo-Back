@@ -12,6 +12,7 @@ def test_rundown_persistence_and_websocket_commands():
     )
     rundown[0]["sourceSlug"] = "RUNDOWN-001"
     rundown[0]["pages"][0]["durationSeconds"] = 15
+    rundown[0]["pages"][0]["bodyHtml"] = "Texto <mark>destacado</mark> e <u data-kind=\"covered\">nota coberta</u>."
     try:
         with TestClient(app) as client:
             assert client.get("/api/health").json()["status"] == "ok"
@@ -45,12 +46,20 @@ def test_rundown_persistence_and_websocket_commands():
                 presenter_paused = presenter.receive_json()
                 assert paused["state"]["paused"] is True
                 assert presenter_paused["state"]["paused"] is True
+                updated_state = {**paused["state"], "scrollPosition": 0.45}
+                operator.send_json(
+                    {"type": "sync", "state": updated_state, "clientId": "operator-test"}
+                )
+                presenter_synced = presenter.receive_json()
+                assert presenter_synced["state"]["scrollPosition"] == 0.45
 
             persisted = client.get("/api/sessions/integration-test/state").json()["state"]
             assert persisted["pageIndex"] == 1
             assert persisted["paused"] is True
+            assert persisted["scrollPosition"] == 0.45
             assert persisted["editorialStories"][1]["headline"] == rundown[1]["headline"]
             assert persisted["editorialStories"][0]["sourceSlug"] == "RUNDOWN-001"
             assert persisted["editorialStories"][0]["pages"][0]["durationSeconds"] == 15
+            assert persisted["editorialStories"][0]["pages"][0]["bodyHtml"] == rundown[0]["pages"][0]["bodyHtml"]
     finally:
         Path("test_teleprompter.db").unlink(missing_ok=True)

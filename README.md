@@ -1,6 +1,6 @@
 # Backend do Teleprompter
 
-API FastAPI com WebSocket para sincronizar telas do operador e do apresentador e persistir as sessões, roteiros, matérias, páginas e preferências.
+API FastAPI com WebSocket para sincronizar telas do operador e do apresentador e persistir as sessões, roteiros, matérias, páginas, formatações, preferências e ponto de rolagem.
 
 ## Requisitos
 
@@ -47,7 +47,7 @@ Na conexão WebSocket o cliente recebe `welcome` com o último estado persistido
 {"type":"command","command":"take_control"}
 ```
 
-O formato dos roteiros e páginas pode ser visto em `../Residencia-Globo-Front/src/data/stories.json`. Preferências da leitura (fonte, cores e contraste), tamanho do texto, velocidade e estado operacional também são salvos por sessão.
+O formato dos roteiros e páginas pode ser visto em `../Residencia-Globo-Front/src/data/stories.json`. Campos adicionais das páginas, incluindo as marcações HTML sanitizadas pelo front, são preservados. Preferências da leitura (fonte, cores e contraste), tamanho do texto, velocidade, estado operacional e ponto relativo de rolagem também são salvos por sessão.
 
 ## Testes
 
@@ -67,6 +67,6 @@ Os testes cobrem saúde do banco, importação e persistência do espelho e coma
 
 Os clientes conectados ao mesmo processo do backend recebem comandos e atualizações em tempo real; o PostgreSQL preserva os dados após reinicializações. Para produção, use HTTPS/WSS, autenticação, credenciais seguras, backup e proxy reverso. A lista de conexões WebSocket é mantida no processo; execute uma única instância do backend enquanto não houver um broker pub/sub distribuído.
 
-## iNEWS: estado e dependências
+## Escopo do produto
 
-Não existe integração direta configurada neste projeto. O backend aceita importação JSON no modelo atual, mas não autentica nem se conecta a um servidor iNEWS. Não há endpoint, versão do produto, método de autenticação, documentação da instalação ou credenciais fornecidas para implementar e testar esse conector. A compatibilidade de exportação e os metadados disponíveis precisam ser confirmados com o administrador iNEWS/Avid da redação; não se deve enviar credenciais para a interface demonstrativa.
+O produto não requer conexão nem autenticação em sistemas editoriais externos. Roteiros são importados por JSON. O avanço automático por reconhecimento de voz não faz parte desta versão; o estado e a posição do texto continuam controláveis manualmente.

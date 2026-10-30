@@ -13,6 +13,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    inspect,
+    text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -48,6 +50,7 @@ class SessionRecord(Base):
     session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     selected_story: Mapped[int] = mapped_column(Integer, default=0)
     page_index: Mapped[int] = mapped_column(Integer, default=0)
+    scroll_position: Mapped[float] = mapped_column(default=0.0)
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     speed: Mapped[float] = mapped_column(default=1.0)
     font_size: Mapped[int] = mapped_column(Integer, default=36)
@@ -100,6 +103,21 @@ class PageRecord(Base):
 async def init_database() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        columns = await connection.run_sync(
+            lambda sync_connection: {
+                column["name"]
+                for column in inspect(sync_connection).get_columns(
+                    SessionRecord.__tablename__
+                )
+            }
+        )
+        if "scroll_position" not in columns:
+            await connection.execute(
+                text(
+                    "ALTER TABLE teleprompter_sessions "
+                    "ADD COLUMN scroll_position FLOAT NOT NULL DEFAULT 0"
+                )
+            )
 
 
 async def close_database() -> None:

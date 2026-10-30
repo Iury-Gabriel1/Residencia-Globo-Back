@@ -60,6 +60,7 @@ class ScriptStory(BaseModel):
 class SessionState(BaseModel):
     selectedStory: int = Field(default=0, ge=0)
     pageIndex: int = Field(default=0, ge=0)
+    scrollPosition: float = Field(default=0, ge=0, le=1)
     paused: bool = False
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     fontSize: int = Field(default=36, ge=18, le=72)
@@ -160,6 +161,7 @@ async def read_session(db: AsyncSession, session_id: str) -> dict[str, Any] | No
     return {
         "selectedStory": record.selected_story,
         "pageIndex": record.page_index,
+        "scrollPosition": record.scroll_position,
         "paused": record.paused,
         "speed": record.speed,
         "fontSize": record.font_size,
@@ -180,6 +182,7 @@ async def save_session(
 
     record.selected_story = state.selectedStory
     record.page_index = state.pageIndex
+    record.scroll_position = state.scrollPosition
     record.paused = state.paused
     record.speed = state.speed
     record.font_size = state.fontSize
@@ -275,6 +278,7 @@ def execute_command(state: SessionState, message: dict[str, Any]) -> SessionStat
             elif command == "previous" and story_index > 0:
                 state.selectedStory = story_index - 1
                 state.pageIndex = len(state.editorialStories[story_index - 1].pages) - 1
+            state.scrollPosition = 0
         state.operatorOverride = True
         state.paused = True
     elif command == "select_story":
@@ -283,6 +287,7 @@ def execute_command(state: SessionState, message: dict[str, Any]) -> SessionStat
             raise ValueError("Índice de matéria inválido.")
         state.selectedStory = story_index
         state.pageIndex = 0
+        state.scrollPosition = 0
         state.operatorOverride = True
         state.paused = True
     elif command == "select_page":
@@ -294,6 +299,7 @@ def execute_command(state: SessionState, message: dict[str, Any]) -> SessionStat
         ):
             raise ValueError("Índice de página inválido.")
         state.pageIndex = page_index
+        state.scrollPosition = 0
         state.operatorOverride = True
         state.paused = True
     else:
