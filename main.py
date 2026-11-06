@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
 import os
+import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
+from starlette.websockets import WebSocketState
 
 from database import (
     PageRecord,
@@ -21,8 +27,19 @@ from database import (
     init_database,
     session_factory,
 )
+from transcription import (
+    MAX_PCM_DURATION_SECONDS,
+    MODEL_NAME,
+    SAMPLE_RATE as REALTIME_AUDIO_SAMPLE_RATE,
+    transcribe_audio_bytes,
+    transcribe_pcm16_bytes,
+)
 
 DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm"}
+MAX_REALTIME_AUDIO_CHUNK_BYTES = 48 * 1024
+MAX_REALTIME_AUDIO_BYTES = REALTIME_AUDIO_SAMPLE_RATE * 2 * MAX_PCM_DURATION_SECONDS
 logger = logging.getLogger("teleprompter")
 allowed_origins = [
     origin.strip()
@@ -31,6 +48,7 @@ allowed_origins = [
 ]
 connections: dict[str, set[WebSocket]] = defaultdict(set)
 session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+active_transcription_sessions: set[str] = set()
 
 
 class ScriptPage(BaseModel):
@@ -321,6 +339,158 @@ async def health() -> dict[str, str]:
     async with session_factory() as db:
         await db.execute(select(1))
     return {"status": "ok", "service": "teleprompter-realtime"}
+
+
+@app.post("/api/transcriptions")
+async def transcribe_audio(audio: UploadFile = File(...)) -> dict[str, str]:
+    filename = audio.filename or ""
+    extension = os.path.splitext(filename)[1].lower()
+    if extension not in SUPPORTED_AUDIO_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail="Formato de áudio não suportado. Envie MP3, MP4, MPEG, MPGA, M4A, WAV ou WEBM.",
+        )
+
+    contents = await audio.read(MAX_AUDIO_BYTES + 1)
+    if not contents:
+        raise HTTPException(status_code=400, detail="O arquivo de áudio está vazio.")
+    if len(contents) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="O arquivo de áudio excede o limite de 25 MB.")
+
+    try:
+        text = await run_in_threadpool(transcribe_audio_bytes, contents, extension)
+    except Exception:
+        logger.exception("Falha na transcrição do arquivo %s", filename)
+        raise HTTPException(
+            status_code=503,
+            detail="O modelo local de transcrição não conseguiu processar o áudio.",
+        ) from None
+
+    return {"text": text, "model": f"faster-whisper:{MODEL_NAME}"}
+
+
+@app.websocket("/ws/{session_id}/transcription")
+async def realtime_transcription_endpoint(websocket: WebSocket, session_id: str) -> None:
+    origin = websocket.headers.get("origin")
+    if origin and origin not in allowed_origins:
+        await websocket.close(code=1008, reason="Origem não permitida.")
+        return
+    await websocket.accept()
+    if session_id in active_transcription_sessions:
+        await websocket.send_json(
+            {"type": "error", "message": "Já existe um acompanhamento de áudio nesta sessão."}
+        )
+        await websocket.close(code=1008, reason="Sessão de áudio já ativa.")
+        return
+
+    active_transcription_sessions.add(session_id)
+    audio_buffer = bytearray()
+    try:
+        await websocket.send_json(
+            {
+                "type": "session.updated",
+                "model": f"faster-whisper:{MODEL_NAME}",
+                "sample_rate": REALTIME_AUDIO_SAMPLE_RATE,
+            }
+        )
+        while True:
+            raw_message = await websocket.receive_text()
+            try:
+                message = json.loads(raw_message)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    {"type": "error", "message": "Mensagem de áudio inválida."}
+                )
+                continue
+
+            message_type = message.get("type") if isinstance(message, dict) else None
+            if message_type == "input_audio_buffer.append":
+                encoded_audio = message.get("audio")
+                if not isinstance(encoded_audio, str):
+                    await websocket.send_json(
+                        {"type": "error", "message": "Bloco de áudio inválido."}
+                    )
+                    continue
+                try:
+                    audio_bytes = base64.b64decode(encoded_audio, validate=True)
+                except (binascii.Error, ValueError):
+                    await websocket.send_json(
+                        {"type": "error", "message": "Bloco de áudio inválido."}
+                    )
+                    continue
+                if (
+                    not audio_bytes
+                    or len(audio_bytes) > MAX_REALTIME_AUDIO_CHUNK_BYTES
+                    or len(audio_buffer) + len(audio_bytes) > MAX_REALTIME_AUDIO_BYTES
+                    or len(audio_bytes) % 2
+                ):
+                    await websocket.send_json(
+                        {"type": "error", "message": "Tamanho do bloco de áudio inválido."}
+                    )
+                    continue
+                audio_buffer.extend(audio_bytes)
+                continue
+
+            if message_type != "input_audio_buffer.commit":
+                await websocket.send_json(
+                    {"type": "error", "message": "Evento de transcrição não permitido."}
+                )
+                continue
+
+            audio_bytes = bytes(audio_buffer)
+            audio_buffer.clear()
+            if not audio_bytes:
+                continue
+
+            item_id = uuid.uuid4().hex
+            await websocket.send_json(
+                {"type": "input_audio_buffer.committed", "item_id": item_id}
+            )
+            await websocket.send_json(
+                {
+                    "type": "transcription.started",
+                    "item_id": item_id,
+                    "message": "Transcrevendo localmente; o primeiro trecho pode demorar enquanto o modelo inicia.",
+                }
+            )
+            try:
+                transcript = await run_in_threadpool(transcribe_pcm16_bytes, audio_bytes)
+            except Exception:
+                logger.exception("Falha na transcrição ao vivo da sessão %s", session_id)
+                await websocket.send_json(
+                    {"type": "error", "message": "Não foi possível transcrever este trecho de áudio."}
+                )
+                break
+            if transcript:
+                await websocket.send_json(
+                    {
+                        "type": "conversation.item.input_audio_transcription.delta",
+                        "item_id": item_id,
+                        "delta": transcript,
+                    }
+                )
+            await websocket.send_json(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": item_id,
+                    "transcript": transcript,
+                }
+            )
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Falha no WebSocket de transcrição da sessão %s", session_id)
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.send_json(
+                {"type": "error", "message": "Falha no serviço local de transcrição."}
+            )
+    finally:
+        active_transcription_sessions.discard(session_id)
+        if websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.close()
+            except (WebSocketDisconnect, RuntimeError):
+                logger.debug("Cliente encerrou a conexão de transcrição da sessão %s", session_id)
 
 
 @app.get("/api/sessions/{session_id}/state")

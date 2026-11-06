@@ -26,6 +26,10 @@ No Windows PowerShell, ative o ambiente com `.venv\Scripts\Activate.ps1`. Para r
 
 O backend cria as tabelas ao iniciar. Configure `DATABASE_URL` para outro endereço PostgreSQL em produção; codifique caracteres especiais da senha conforme URL encoding. Proteja o arquivo `.env` e não reutilize as credenciais de desenvolvimento em produção.
 
+As transcrições de arquivos e ao vivo são processadas localmente com faster-whisper; não é necessária chave de API. Na primeira execução, o faster-whisper baixa os pesos do modelo configurado em `FASTER_WHISPER_MODEL` (padrão: `small`), portanto o servidor precisa de internet e espaço em disco. Depois do download, a inferência usa CPU com `int8`. O endpoint de arquivos aceita MP3, MP4, MPEG, MPGA, M4A, WAV e WEBM de até 25 MB.
+
+No acompanhamento ao vivo, o microfone transmite PCM mono a 24 kHz ao WebSocket do backend. Cada trecho é processado localmente quando há uma pausa ou ao atingir o limite de duração do trecho; o alinhamento não é uma transcrição palavra a palavra em streaming. O acesso ao microfone requer HTTPS ou `localhost`.
+
 ## API e WebSocket
 
 - Saúde e conexão ao banco: `GET http://localhost:8000/api/health`
@@ -33,7 +37,9 @@ O backend cria as tabelas ao iniciar. Configure `DATABASE_URL` para outro endere
 - Estado persistido: `GET /api/sessions/{session_id}/state`
 - Atualizar estado: `POST /api/sessions/{session_id}/state`, corpo `{"state": {...}}`
 - Importar espelho: `POST /api/sessions/{session_id}/rundown`, corpo `{"stories": [...]}`. Valida o roteiro, preserva a ordem e os campos editoriais, persiste matérias/páginas e transmite a atualização aos clientes conectados.
+- Transcrever áudio: `POST /api/transcriptions`, formulário multipart com o campo `audio`; retorna `{"text": "...", "model": "faster-whisper:small"}` (o nome acompanha `FASTER_WHISPER_MODEL`).
 - WebSocket: `ws://localhost:8000/ws/{session_id}`
+- Transcrição ao vivo: `ws://localhost:8000/ws/{session_id}/transcription`. Recebe `input_audio_buffer.append` com blocos PCM16 mono em base64 e `input_audio_buffer.commit` para transcrever o trecho localmente.
 
 Na conexão WebSocket o cliente recebe `welcome` com o último estado persistido. Mensagens `sync` salvam e distribuem o estado. Comandos executáveis:
 
